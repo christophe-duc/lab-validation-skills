@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# ro-inspect [--dry-run] DISK CMDFILE: read a guest disk without booting it (guestfish --ro -i).
+# Every command is prefixed with "-" so one failure (missing file, empty glob) does not abort
+# the rest. guestfish syntax: "cat F", "ls D", "is-file F", "glob ls D/*", "tail-n 15 F".
+# Shut the VM down first for a consistent view; never mount a running guest read-write.
+HERE=$(cd "$(dirname "$0")" && pwd)
+# shellcheck source=_lib.sh
+source "$HERE/_lib.sh"
+DRY=no
+if [ "${1:-}" = --dry-run ]; then DRY=yes; shift; fi
+[ $# -eq 2 ] || usage "[--dry-run] DISK CMDFILE"
+[ -r "$2" ] || die "cannot read command file $2"
+SCRIPT=$(sed -e '/^[[:space:]]*$/d' -e '/^[[:space:]]*#/d' -e 's/^[[:space:]]*-\{0,1\}/-/' "$2")
+[ -n "$SCRIPT" ] || die "no commands in $2"
+if [ "$DRY" = yes ]; then printf '%s\n' "$SCRIPT"; exit 0; fi
+printf '%s\n' "$SCRIPT" | sudo guestfish --ro -a "$1" -i

@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# proc-kill [--dry-run] PATTERN: kill processes whose command line matches PATTERN (pgrep -f),
+# but never this script, its ancestors or its children. A plain `pkill -f PATTERN` run from
+# `bash -c` or ssh kills its own shell, because that shell's command line contains PATTERN.
+set -euo pipefail
+DRY=no
+if [ "${1:-}" = --dry-run ]; then DRY=yes; shift; fi
+if [ $# -ne 1 ] || [ -z "$1" ]; then echo "usage: proc-kill [--dry-run] PATTERN" >&2; exit 2; fi
+anc=" $$ "; p=$$
+while [ "$p" -gt 1 ]; do
+  p=$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ') || break
+  [ -n "$p" ] || break
+  anc="$anc$p "
+done
+cands=$(pgrep -f -- "$1" || true)
+n=0
+for pid in $cands; do
+  case "$anc" in *" $pid "*) continue ;; esac
+  kill -0 "$pid" 2>/dev/null || continue
+  [ "$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')" = "$$" ] && continue
+  args=$(ps -o args= -p "$pid" 2>/dev/null | cut -c1-120)
+  if [ "$DRY" = yes ]; then echo "would-kill $pid $args"; else echo "kill $pid $args"; kill "$pid" 2>/dev/null || true; fi
+  n=$((n + 1))
+done
+echo "proc-kill: $n process(es) matched '$1'"

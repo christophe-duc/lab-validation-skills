@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# vm-ssh DOM [command...]: ssh to a lab VM as ${VM_USER:-$LAB_USER} with host-key checks off
+# (lab-only shortcut: clones get new host keys). stdin is passed through; scripts calling
+# vm-ssh must add </dev/null unless they mean to feed it (ssh otherwise eats the script).
+HERE=$(cd "$(dirname "$0")" && pwd)
+# shellcheck source=_lib.sh
+source "$HERE/_lib.sh"
+[ $# -ge 1 ] || usage "DOM [command...]"
+DOM=$1; shift
+load_env_optional
+IP=$("$HERE/vm-ip" "$DOM") || die "no reachable IP for $DOM"
+exec ssh "${SSH_OPTS[@]}" "${VM_USER:-$LAB_USER}@$IP" "$@"

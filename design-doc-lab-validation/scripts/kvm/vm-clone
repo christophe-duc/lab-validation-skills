@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# vm-clone NAME BASE.qcow2 [ISO|none]: linked clone (qcow2 overlay on BASE) with a fresh NVRAM,
+# booted with vm-create --import. Env: as vm-create, plus PRE_HOOK (run as "PRE_HOOK <overlay>"
+# before first boot, e.g. virt-customize). BASE must be absolute and should be read-only.
+HERE=$(cd "$(dirname "$0")" && pwd)
+# shellcheck source=_lib.sh
+source "$HERE/_lib.sh"
+if [ $# -lt 2 ] || [ $# -gt 3 ]; then usage "NAME BASE.qcow2 [ISO|none]"; fi
+NAME=$1; BASE=$2; ISO=${3:-none}
+load_env
+require_prefix "$NAME"
+case "$BASE" in /*) ;; *) die "BASE must be an absolute path (it is stored in the overlay)" ;; esac
+DISK=$IMG/$NAME.qcow2
+if sudo test -e "$DISK"; then die "$DISK already exists"; fi
+sudo qemu-img create -q -f qcow2 -F qcow2 -b "$BASE" "$DISK"
+if [ -n "${PRE_HOOK:-}" ]; then
+  rc=0; "$PRE_HOOK" "$DISK" || rc=$?
+  if [ "$rc" -ne 0 ]; then sudo rm -f "$DISK"; exit "$rc"; fi
+fi
+A=(--disk "$DISK" --import)
+if [ "$ISO" != none ]; then A+=(--cdrom "$ISO"); fi
+rc=0; "$HERE/vm-create" "$NAME" "${A[@]}" || rc=$?
+if [ "$rc" -ne 0 ]; then sudo rm -f "$DISK"; exit "$rc"; fi

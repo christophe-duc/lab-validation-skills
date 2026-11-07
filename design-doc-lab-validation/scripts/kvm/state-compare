@@ -1,0 +1,59 @@
+#!/usr/bin/env python3
+"""usage: state-compare --unique k1,k2,... A.env B.env [...]
+
+Compare key=value state files (e.g. written by a verify script on each clone).
+Exit 1 and print a DUPLICATE line for every non-empty value of a unique key that two
+files share; exit 0 if none; exit 2 on usage errors, unreadable files, or a key that is
+absent from every file (a typo would otherwise pass). A key present in some files only
+gets a "note:" line on stderr. Files are read with errors="replace".
+"""
+import sys
+
+
+def load(path):
+    d = {}
+    with open(path, errors="replace") as f:
+        for line in f:
+            if "=" in line:
+                k, v = line.rstrip("\n").split("=", 1)
+                d[k] = v
+    return d
+
+
+def main(argv):
+    if len(argv) < 4 or argv[0] != "--unique" or not argv[1].strip(","):
+        print(__doc__.splitlines()[0], file=sys.stderr)
+        return 2
+    keys = [k for k in argv[1].split(",") if k]
+    try:
+        states = {p: load(p) for p in argv[2:]}
+    except OSError as e:
+        print(f"state-compare: {e}", file=sys.stderr)
+        return 2
+    missing = [k for k in keys if all(k not in d for d in states.values())]
+    for k in missing:
+        print(f"state-compare: key {k} absent in all {len(states)} files", file=sys.stderr)
+    if missing:
+        return 2
+    for k in keys:
+        lacking = [p for p, d in states.items() if k not in d]
+        if lacking:
+            print(f"note: key {k} absent in {', '.join(lacking)}", file=sys.stderr)
+    dups = 0
+    for k in keys:
+        seen = {}
+        for p, d in states.items():
+            v = d.get(k, "")
+            if not v:
+                continue
+            if v in seen:
+                print(f"DUPLICATE {k}={v}: {seen[v]} and {p}")
+                dups += 1
+            else:
+                seen[v] = p
+    print(f"compared {len(states)} files on {len(keys)} keys: {dups} duplicate(s)")
+    return 1 if dups else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

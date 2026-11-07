@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# vm-ip DOM: print the first IPv4 of DOM that answers on TCP 22 (DHCP lease first, then ARP).
+# libvirt keeps stale leases for a MAC after reinstalls, so every candidate is probed.
+# VM_IP=addr overrides (static-IP guests on networks without DHCP). Exit 1 if none answers.
+set -euo pipefail
+if [ $# -ne 1 ]; then echo "usage: vm-ip DOM" >&2; exit 2; fi
+if [ -n "${VM_IP:-}" ]; then echo "$VM_IP"; exit 0; fi
+for src in lease arp; do
+  for cand in $(virsh domifaddr "$1" --source "$src" 2>/dev/null | awk '/ipv4/{print $4}' | cut -d/ -f1); do
+    # shellcheck disable=SC2016  # $0 must expand in the inner bash, not here
+    if timeout 3 bash -c 'exec 3<>"/dev/tcp/$0/22"' "$cand" 2>/dev/null; then echo "$cand"; exit 0; fi
+  done
+done
+exit 1

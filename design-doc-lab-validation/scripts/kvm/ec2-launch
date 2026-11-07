@@ -1,0 +1,167 @@
+#!/usr/bin/env bash
+# ec2-launch --name N --type T [--region R] [--disk-gb 200] [--key K] [--ubuntu 26.04] [--yes]
+# Plan (default) or launch (--yes) one lab host with nested virtualization: security group N
+# with SSH from this workstation's /32 only, Ubuntu AMI from SSM, gp3 root, --cpu-options
+# NestedVirtualization=enabled, tags Name=N, lab-harness=true. Writes ./instance-N.env.
+# Never stops or terminates anything: teardown is the owner's decision.
+set -euo pipefail
+U="usage: ec2-launch --name N --type T [--region R] [--disk-gb 200] [--key K] [--ubuntu 26.04] [--yes]"
+NAME=""; TYPE=""; REG=""; DISK=200; KEY=""; UBU=26.04; YES=no
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --name) NAME=${2:-}; shift 2 || { echo "$U" >&2; exit 2; } ;;
+    --type) TYPE=${2:-}; shift 2 || { echo "$U" >&2; exit 2; } ;;
+    --region) REG=${2:-}; shift 2 || { echo "$U" >&2; exit 2; } ;;
+    --disk-gb) DISK=${2:-}; shift 2 || { echo "$U" >&2; exit 2; } ;;
+    --key) KEY=${2:-}; shift 2 || { echo "$U" >&2; exit 2; } ;;
+    --ubuntu) UBU=${2:-}; shift 2 || { echo "$U" >&2; exit 2; } ;;
+    --yes) YES=yes; shift ;;
+    *) echo "$U" >&2; exit 2 ;;
+  esac
+done
+if [ -z "$NAME" ] || [ -z "$TYPE" ]; then echo "$U" >&2; exit 2; fi
+KEY=${KEY:-$NAME}
+case "$NAME" in *[!A-Za-z0-9._-]*) echo "ec2-launch: invalid --name '$NAME' (allowed: A-Z a-z 0-9 . _ -)" >&2; echo "$U" >&2; exit 2 ;; esac
+case "$KEY" in *[!A-Za-z0-9._-]*) echo "ec2-launch: invalid --key '$KEY' (allowed: A-Z a-z 0-9 . _ -)" >&2; echo "$U" >&2; exit 2 ;; esac
+case "$DISK" in ''|*[!0-9]*) echo "ec2-launch: invalid --disk-gb '$DISK' (digits only)" >&2; echo "$U" >&2; exit 2 ;; esac
+command -v aws >/dev/null 2>&1 || { echo "ec2-launch: aws CLI not found" >&2; exit 1; }
+REG=${REG:-${AWS_REGION:-$(aws configure get region 2>/dev/null || true)}}
+[ -n "$REG" ] || { echo "no region: pass --region or set AWS_REGION" >&2; exit 2; }
+AMI_PARAM=/aws/service/canonical/ubuntu/server/$UBU/stable/current/amd64/hvm/ebs-gp3/ami-id
+FEAT=$(aws ec2 describe-instance-types --region "$REG" --instance-types "$TYPE" \
+  --query 'InstanceTypes[0].ProcessorInfo.SupportedFeatures' --output text 2>/dev/null || true)
+case " $FEAT " in
+  *nested-virtualization*) ;;
+  *) echo "$TYPE does not report nested-virtualization in $REG (features: ${FEAT:-none}); run ec2-nested-check" >&2; exit 1 ;;
+esac
+if ! IPRAW=$(curl -fsS -m 5 https://checkip.amazonaws.com 2>/dev/null); then
+  echo "ec2-launch: could not determine your public IP (checkip.amazonaws.com)" >&2; exit 1
+fi
+MYIP="$(printf '%s' "$IPRAW" | tr -d '[:space:]')/32"
+if ! printf '%s' "$MYIP" | grep -Eq '^[0-9]{1,3}(\.[0-9]{1,3}){3}/32$'; then
+  echo "ec2-launch: could not determine your public IP (checkip.amazonaws.com returned an unexpected body)" >&2; exit 1
+fi
+# Read-only: resolve the AMI now so the plan shows it (the launch would fail on a bad parameter anyway).
+# stdout is parsed, so stderr goes to a separate temp file (never merged into the value).
+AMI_ERRF=$(mktemp "${TMPDIR:-/tmp}/ec2-launch-ami.XXXXXX")
+if ! AMI_ID=$(aws ssm get-parameter --region "$REG" --name "$AMI_PARAM" --query Parameter.Value --output text 2>"$AMI_ERRF"); then
+  AMI_ERR=$(cat "$AMI_ERRF"); rm -f "$AMI_ERRF"
+  echo "ec2-launch: cannot resolve the AMI ($AMI_PARAM): ${AMI_ERR:-$AMI_ID}" >&2; exit 1
+fi
+AMI_ERR=$(cat "$AMI_ERRF"); rm -f "$AMI_ERRF"
+if ! printf '%s' "$AMI_ID" | grep -Eq '^ami-[0-9a-f]+$'; then
+  echo "ec2-launch: AMI parameter ($AMI_PARAM) returned an unexpected value '$AMI_ID'${AMI_ERR:+: $AMI_ERR}" >&2; exit 1
+fi
+# The python reader prints "unknown" itself on any parse failure; "|| true" (not "|| echo unknown")
+# so a failing aws call under pipefail cannot add a second line.
+PRICE=$(aws pricing get-products --region us-east-1 --service-code AmazonEC2 --filters \
+    "Type=TERM_MATCH,Field=instanceType,Value=$TYPE" "Type=TERM_MATCH,Field=regionCode,Value=$REG" \
+    Type=TERM_MATCH,Field=operatingSystem,Value=Linux Type=TERM_MATCH,Field=tenancy,Value=Shared \
+    Type=TERM_MATCH,Field=preInstalledSw,Value=NA Type=TERM_MATCH,Field=capacitystatus,Value=Used \
+    --query 'PriceList[0]' --output text 2>/dev/null | python3 -c '
+import json, sys
+try:
+    od = next(iter(json.loads(sys.stdin.read())["terms"]["OnDemand"].values()))
+    print(next(iter(od["priceDimensions"].values()))["pricePerUnit"]["USD"])
+except Exception:
+    print("unknown")' 2>/dev/null || true)
+PRICE=${PRICE:-unknown}
+cat <<EOF
+plan: launch 1 x $TYPE in $REG (on-demand $PRICE USD/h, Linux, shared tenancy)
+  name / tags     $NAME (lab-harness=true)
+  ami             $AMI_ID ($AMI_PARAM)
+  cpu-options     NestedVirtualization=enabled
+  root volume     ${DISK} GB gp3, deleted on termination
+  key pair        $KEY (private key ~/.ssh/$KEY.pem)
+  security group  $NAME: tcp/22 from $MYIP only
+EOF
+if [ "$YES" != yes ]; then echo "dry run: nothing created. Re-run with --yes to launch (this spends money)."; exit 0; fi
+
+die() { echo "ec2-launch: $*" >&2; exit 1; }
+write_env() {  # $1 = public IP (may be empty)
+  cat > "./instance-$NAME.env" <<ENVEOF
+AWS_REGION=$REG
+INSTANCE_ID=$ID
+PUBLIC_IP=$1
+SG_ID=$SG_ID
+KEY=$KEY
+MYIP=$MYIP
+ENVEOF
+}
+
+# Re-run guard: never launch a second host for the same name.
+[ ! -e "./instance-$NAME.env" ] || die "./instance-$NAME.env already exists: $NAME was already launched from here (remove the file only if that instance is gone)"
+LIVE_ERRF=$(mktemp "${TMPDIR:-/tmp}/ec2-launch-live.XXXXXX")
+if ! LIVE=$(aws ec2 describe-instances --region "$REG" \
+    --filters "Name=tag:Name,Values=$NAME" "Name=instance-state-name,Values=pending,running,stopping,stopped" \
+    --query 'Reservations[].Instances[].InstanceId' --output text 2>"$LIVE_ERRF"); then
+  LIVE_ERR=$(cat "$LIVE_ERRF"); rm -f "$LIVE_ERRF"
+  die "cannot check for existing instances named $NAME: ${LIVE_ERR:-$LIVE}"
+fi
+rm -f "$LIVE_ERRF"
+LIVE_IDS=$(printf '%s' "$LIVE" | tr -s '[:space:]' ' ')
+if [ -n "${LIVE_IDS// /}" ] && [ "${LIVE_IDS// /}" != None ]; then
+  die "an instance named $NAME already exists (${LIVE_IDS% }); refusing to launch another"
+fi
+
+# Key pair: only a definite NotFound means "missing"; any other error aborts.
+if KPERR=$(aws ec2 describe-key-pairs --region "$REG" --key-names "$KEY" 2>&1 >/dev/null); then
+  [ -f "$HOME/.ssh/$KEY.pem" ] || die "key pair $KEY exists in AWS but ~/.ssh/$KEY.pem is missing; pass --key with a key you hold"
+else
+  case "$KPERR" in
+    *InvalidKeyPair.NotFound*) ;;
+    *) die "describe-key-pairs failed: $KPERR" ;;
+  esac
+  [ ! -e "$HOME/.ssh/$KEY.pem" ] || die "$HOME/.ssh/$KEY.pem already exists but key pair $KEY is not in AWS; move it away or pass --key with another name (never overwritten)"
+  # shellcheck disable=SC2174  # only ~/.ssh itself can be new ($HOME exists)
+  mkdir -p -m 700 "$HOME/.ssh"
+  KTMP=$(umask 077; mktemp "$HOME/.ssh/.$KEY.pem.XXXXXX")
+  if ! aws ec2 create-key-pair --region "$REG" --key-name "$KEY" --key-type ed25519 \
+       --query KeyMaterial --output text > "$KTMP" || [ ! -s "$KTMP" ]; then
+    rm -f "$KTMP"; die "create-key-pair failed for $KEY"
+  fi
+  chmod 600 "$KTMP"; mv "$KTMP" "$HOME/.ssh/$KEY.pem"
+  echo "created key pair $KEY -> ~/.ssh/$KEY.pem"
+fi
+SG_ID=$(aws ec2 describe-security-groups --region "$REG" --filters "Name=group-name,Values=$NAME" \
+  --query 'SecurityGroups[0].GroupId' --output text 2>/dev/null || true)
+if [ -z "$SG_ID" ] || [ "$SG_ID" = None ]; then
+  SG_ID=$(aws ec2 create-security-group --region "$REG" --group-name "$NAME" \
+    --description "lab $NAME: SSH from the engineer only" --query GroupId --output text)
+fi
+if ! ERR=$(aws ec2 authorize-security-group-ingress --region "$REG" --group-id "$SG_ID" --protocol tcp --port 22 \
+    --cidr "$MYIP" 2>&1 >/dev/null); then
+  case "$ERR" in
+    *InvalidPermission.Duplicate*) echo "note: ingress $MYIP on $SG_ID already present" ;;
+    *) die "authorize-security-group-ingress failed: $ERR" ;;
+  esac
+fi
+ID=$(aws ec2 run-instances --region "$REG" --image-id "$AMI_ID" --instance-type "$TYPE" --key-name "$KEY" \
+  --security-group-ids "$SG_ID" --cpu-options NestedVirtualization=enabled \
+  --block-device-mappings "[{\"DeviceName\":\"/dev/sda1\",\"Ebs\":{\"VolumeSize\":$DISK,\"VolumeType\":\"gp3\",\"DeleteOnTermination\":true}}]" \
+  --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=$NAME},{Key=lab-harness,Value=true}]" \
+  --query 'Instances[0].InstanceId' --output text)
+echo "ec2-launch: launched $ID; recording it in ./instance-$NAME.env" >&2
+write_env "" || die "instance $ID launched but could not write ./instance-$NAME.env: record the id above; terminate it only if you do not want it"
+echo "wrote ./instance-$NAME.env (instance id recorded)"
+echo "launched $ID; waiting for running..."
+if ! aws ec2 wait instance-running --region "$REG" --instance-ids "$ID"; then
+  echo "ec2-launch: instance $ID was launched but did not reach running; it is recorded in ./instance-$NAME.env" >&2
+  echo "check:    aws ec2 describe-instances --region $REG --instance-ids $ID   (or: ec2-nested-check --region $REG --instance $ID)" >&2
+  exit 1
+fi
+if ! IP=$(aws ec2 describe-instances --region "$REG" --instance-ids "$ID" \
+    --query 'Reservations[0].Instances[0].PublicIpAddress' --output text); then
+  echo "ec2-launch: instance $ID is running but its public address could not be read; the id is in ./instance-$NAME.env" >&2
+  echo "check:    aws ec2 describe-instances --region $REG --instance-ids $ID   (or: ec2-nested-check --region $REG --instance $ID)" >&2
+  exit 1
+fi
+case "$IP" in None|null) IP="" ;; esac
+if [ -z "$IP" ]; then
+  echo "note: instance $ID has no public IP; PUBLIC_IP left empty in ./instance-$NAME.env"
+fi
+write_env "$IP" || die "instance $ID is running but ./instance-$NAME.env could not be updated with its address"
+echo "wrote ./instance-$NAME.env"
+[ -z "$IP" ] || echo "ssh:      ssh -i ~/.ssh/$KEY.pem ubuntu@$IP"
+echo "check:    ec2-nested-check --region $REG --instance $ID"
+echo "teardown (owner only; NOT run): aws ec2 terminate-instances --region $REG --instance-ids $ID"

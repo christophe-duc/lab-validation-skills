@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# ec2-nested-check [--region R] [--family PREFIX] [--instance ID]
+# Read-only. Which EC2 instance types does AWS report with the "nested-virtualization"
+# processor feature in this region? Does this AWS CLI know CpuOptions.NestedVirtualization?
+# With --instance: is nested virtualization enabled on that instance? Exit 0 ok, 1 a check
+# failed, 2 usage. Do not rely on a remembered list of types: run this.
+set -euo pipefail
+U="usage: ec2-nested-check [--region R] [--family PREFIX] [--instance ID]"
+REG=""; FAM=""; INST=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --region) REG=${2:-}; shift 2 || { echo "$U" >&2; exit 2; } ;;
+    --family) FAM=${2:-}; shift 2 || { echo "$U" >&2; exit 2; } ;;
+    --instance) INST=${2:-}; shift 2 || { echo "$U" >&2; exit 2; } ;;
+    *) echo "$U" >&2; exit 2 ;;
+  esac
+done
+command -v aws >/dev/null || { echo "aws CLI not found" >&2; exit 1; }
+REG=${REG:-${AWS_REGION:-$(aws configure get region 2>/dev/null || true)}}
+[ -n "$REG" ] || { echo "no region: pass --region or set AWS_REGION" >&2; exit 2; }
+rc=0
+# capture first: `aws ... | grep -q` gives aws a SIGPIPE, and pipefail would then report "unknown"
+SKEL=$(aws ec2 run-instances --generate-cli-skeleton input 2>/dev/null || true)
+if grep -q NestedVirtualization <<<"$SKEL"; then
+  echo "cli: $(aws --version 2>&1 | cut -d' ' -f1) knows CpuOptions.NestedVirtualization"
+else
+  echo "cli: this AWS CLI does not know CpuOptions.NestedVirtualization: upgrade AWS CLI v2"; rc=1
+fi
+TYPES=$(aws ec2 describe-instance-types --region "$REG" \
+  --filters Name=processor-info.supported-features,Values=nested-virtualization \
+  --query 'InstanceTypes[].InstanceType' --output text 2>/dev/null | tr '\t' '\n' | grep -v '^$' | sort || true)
+if [ -n "$FAM" ]; then TYPES=$(printf '%s\n' "$TYPES" | grep "^$FAM\." || true); fi
+if [ -z "$TYPES" ]; then
+  echo "types: none reported in $REG${FAM:+ for family $FAM}"; rc=1
+else
+  echo "types in $REG with nested-virtualization ($(printf '%s\n' "$TYPES" | wc -l | tr -d ' ')):"
+  printf '%s\n' "$TYPES" | awk -F. '{f[$1] = f[$1] " " $2} END {for (k in f) print "  " k ":" f[k]}' | sort
+fi
+if [ -n "$INST" ]; then
+  if ! read -r ITYPE ISTATE INV < <(aws ec2 describe-instances --region "$REG" --instance-ids "$INST" \
+      --query 'Reservations[0].Instances[0].[InstanceType,State.Name,CpuOptions.NestedVirtualization]' --output text); then
+    echo "instance $INST: not found in $REG"; exit 1
+  fi
+  # --output text prints a null field as "None"
+  if [ "${INV:-}" = None ]; then INV=""; fi
+  echo "instance $INST: type $ITYPE, state $ISTATE, NestedVirtualization=${INV:-unset}"
+  if [ "${INV:-}" != enabled ]; then
+    echo "  enable on the stopped instance: aws ec2 modify-instance-cpu-options --region $REG --instance-id $INST --core-count <C> --threads-per-core 2 --nested-virtualization enabled"
+    rc=1
+  fi
+fi
+exit $rc

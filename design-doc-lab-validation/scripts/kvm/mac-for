@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# mac-for NAME: stable libvirt MAC (52:54:00:xx:xx:xx) derived from the VM name, so files
+# generated before boot (ovf-env.xml, DHCP reservations) can carry the MAC.
+set -euo pipefail
+if [ $# -ne 1 ] || [ -z "$1" ]; then echo "usage: mac-for NAME" >&2; exit 2; fi
+if command -v md5sum >/dev/null; then h=$(printf '%s' "$1" | md5sum); else h=$(printf '%s' "$1" | md5 -q); fi
+printf '52:54:00:%s:%s:%s\n' "${h:0:2}" "${h:2:2}" "${h:4:2}"

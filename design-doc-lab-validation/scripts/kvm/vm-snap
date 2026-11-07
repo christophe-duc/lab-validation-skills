@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# vm-snap snap VM NAME | restore VM NAME | list VM
+# Save or restore a VM's disk, NVRAM, swtpm state and domain XML together, with SHA256, under
+# $LAB_DIR/snaps/VM/NAME/. Names are never overwritten. restore verifies the hashes first.
+# The VM is left shut off. Only the first (boot) disk is saved. For overlay clones only the
+# overlay is saved (keep the base read-only).
+HERE=$(cd "$(dirname "$0")" && pwd)
+# shellcheck source=_lib.sh
+source "$HERE/_lib.sh"
+U="snap VM NAME | restore VM NAME | list VM"
+[ $# -ge 2 ] || usage "$U"
+ACT=$1; VM=$2; N=${3:-}
+case "$ACT" in snap|restore) [ -n "$N" ] || usage "$U" ;; list) ;; *) usage "$U" ;; esac
+load_env
+require_prefix "$VM"
+if [ "$ACT" = list ]; then ls -1 "$LAB_DIR/snaps/$VM" 2>/dev/null || true; exit 0; fi
+B=$LAB_DIR/snaps/$VM/$N
+if [ "$ACT" = restore ] && [ ! -f "$B/SHA256" ]; then die "no snapshot $B"; fi
+if [ "$ACT" = snap ] && [ -e "$B" ]; then die "snapshot $B exists (names are never overwritten)"; fi
+# no early `exit` in awk and no `head`: virsh would get SIGPIPE and pipefail would kill the script silently
+DISK=$(virsh domblklist "$VM" --details | awk '$1=="file" && $2=="disk" && !d{print $4; d=1}')
+[ -n "$DISK" ] || die "no file disk found for $VM"
+NV=$(virsh dumpxml "$VM" | sed -n 's:.*<nvram[^>]*>\(.*\)</nvram>.*:\1:p' | awk 'NR==1')
+UUID=$(virsh domuuid "$VM" 2>/dev/null) || UUID=""
+[ -n "$UUID" ] || die "cannot get domuuid of $VM"
+TPMD=/var/lib/libvirt/swtpm/$UUID
+stop_vm() {
+  if [ "$(virsh domstate "$VM")" = "shut off" ]; then return 0; fi
+  virsh shutdown "$VM" >/dev/null 2>&1 || true
+  for _ in $(seq 1 30); do
+    if [ "$(virsh domstate "$VM")" = "shut off" ]; then return 0; fi
+    sleep 2
+  done
+  virsh destroy "$VM" >/dev/null
+}
+case "$ACT" in
+  snap)
+    stop_vm
+    mkdir -p "$B"
+    sudo cp --sparse=always "$DISK" "$B/disk.qcow2"
+    if [ -n "$NV" ]; then sudo cp "$NV" "$B/nvram.fd"; fi
+    if sudo test -d "$TPMD"; then sudo cp -a "$TPMD" "$B/swtpm"; fi
+    virsh dumpxml "$VM" > "$B/domain.xml"
+    (cd "$B" && sudo find . -type f ! -name SHA256 -exec sha256sum {} + | sort -k2) > "$B/SHA256"
+    echo "snap $VM -> $B"; cat "$B/SHA256" ;;
+  restore)
+    (cd "$B" && sudo sha256sum -c --quiet SHA256) || die "hash mismatch in $B; not restoring"
+    virsh destroy "$VM" >/dev/null 2>&1 || true
+    if [ "$(virsh domstate "$VM")" != "shut off" ]; then die "$VM is still running; refusing to overwrite its disk"; fi
+    sudo cp --sparse=always "$B/disk.qcow2" "$DISK"
+    if [ -f "$B/nvram.fd" ] && [ -n "$NV" ]; then sudo cp "$B/nvram.fd" "$NV"; fi
+    if sudo test -d "$B/swtpm"; then sudo rm -rf "$TPMD"; sudo cp -a "$B/swtpm" "$TPMD"; fi
+    echo "restored $VM from $B (left shut off)" ;;
+esac

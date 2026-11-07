@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# env-dump [FILE...]: record host OS, tool versions, EC2 identity (IMDSv2), VMs and the sha256
+# of each FILE in $EVID/environment.txt (environment-<timestamp>.txt if that exists).
+HERE=$(cd "$(dirname "$0")" && pwd)
+# shellcheck source=_lib.sh
+source "$HERE/_lib.sh"
+load_env
+for f in "$@"; do
+  if ! { [ -r "$f" ] || sudo test -r "$f"; }; then die "cannot read artifact $f"; fi
+done
+OUT=$EVID/environment.txt
+if [ -e "$OUT" ]; then OUT=$EVID/environment-$(date -u +%Y%m%dT%H%M%SZ).txt; fi
+{
+  echo "# environment $(date -u +%Y-%m-%dT%H:%M:%SZ) on $(hostname)"
+  echo "## os"
+  uname -a
+  lsb_release -ds 2>/dev/null || head -2 /etc/os-release 2>/dev/null || sw_vers 2>/dev/null || true
+  echo "cpus $(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null)"
+  free -m 2>/dev/null | sed -n 2p || true
+  df -h / | tail -1
+  echo "## tools"
+  qemu-system-x86_64 --version 2>/dev/null | head -1 || echo "qemu n/a"
+  echo "libvirt $(virsh --version 2>/dev/null || echo n/a)"
+  echo "virt-install $(virt-install --version 2>/dev/null || echo n/a)"
+  # shellcheck disable=SC2016  # dpkg-query format string, not a shell expansion
+  dpkg-query -W -f='${Package} ${Version}\n' ovmf swtpm libguestfs-tools nginx genisoimage 2>/dev/null || true
+  echo "## ec2"
+  TOK=$(curl -s -m 2 -X PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' 2>/dev/null || true)
+  if [ -n "$TOK" ]; then
+    for k in instance-id instance-type placement/availability-zone ami-id; do
+      echo "$k $(curl -s -m 2 -H "X-aws-ec2-metadata-token: $TOK" "http://169.254.169.254/latest/meta-data/$k")"
+    done
+  else
+    echo "not on EC2 (no IMDS answer)"
+  fi
+  echo "## vms"
+  virsh list --all 2>/dev/null || true
+  echo "## artifacts"
+  for f in "$@"; do sudo sha256sum "$f" 2>/dev/null || shasum -a 256 "$f"; done
+} > "$OUT" 2>&1
+echo "wrote $OUT"

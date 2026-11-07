@@ -1,0 +1,26 @@
+[2J[001;001H[=3h[2J[001;001H[2J[001;001H[8;056;240t[2J[001;001HBdsDxe: failed to load Boot0002 "Ubuntu" from HD(1,GPT,2A1B1333-AA66-4AFD-BA0C-06C13558F237,0x800,0x200000)/\EFI\ubuntu\shimx64.efi: Not Found
+
+>>Start PXE over IPv4.
+  PXE-E16: No valid offer received.
+BdsDxe: failed to load Boot0003 "UEFI PXEv4 (MAC:525400A69999)" from PciRoot(0x0)/Pci(0x1,0x0)/Pci(0x0,0x0)/Pci(0x1,0x0)/MAC(525400A69999,0x1)/IPv4(0.0.0.0,0x0,DHCP,0.0.0.0,0.0.0.0,0.0.0.0): Not Found
+
+>>Start PXE over IPv6.
+  PXE-E16: No valid offer received.
+BdsDxe: failed to load Boot0004 "UEFI PXEv6 (MAC:525400A69999)" from PciRoot(0x0)/Pci(0x1,0x0)/Pci(0x0,0x0)/Pci(0x1,0x0)/MAC(525400A69999,0x1)/IPv6(0000:0000:0000:0000:0000:0000:0000:0000,0x0,Static,0000:0000:0000:0000:0000:0000:0000:0000,0x40,0000:0000:0000:0000:0000:0000:0000:0000): Not Found
+
+>>Start HTTP Boot over IPv4.....
+  Error: Could not retrieve NBP file size from HTTP server.
+
+  Error: Server response timeout.
+BdsDxe: failed to load Boot0005 "UEFI HTTPv4 (MAC:525400A69999)" from PciRoot(0x0)/Pci(0x1,0x0)/Pci(0x0,0x0)/Pci(0x1,0x0)/MAC(525400A69999,0x1)/IPv4(0.0.0.0,0x0,DHCP,0.0.0.0,0.0.0.0,0.0.0.0)/Uri(): Not Found
+
+>>Start HTTP Boot over IPv6.
+  Error: Could not retrieve NBP file size from HTTP server.
+
+  Error: Unexpected network error.
+BdsDxe: failed to load Boot0006 "UEFI HTTPv6 (MAC:525400A69999)" from PciRoot(0x0)/Pci(0x1,0x0)/Pci(0x0,0x0)/Pci(0x1,0x0)/MAC(525400A69999,0x1)/IPv6(0000:0000:0000:0000:0000:0000:0000:0000,0x0,Static,0000:0000:0000:0000:0000:0000:0000:0000,0x40,0000:0000:0000:0000:0000:0000:0000:0000)/Uri(): Not Found
+BdsDxe: No bootable option or device was found.
+BdsDxe: Press any key to enter the Boot Manager Menu.
+BdsDxe: loading Boot0000 "BootManagerMenuApp" from Fv(7CB8BDC9-F8EB-4F34-AAEA-3EE4AF6516A1)/FvFile(EEC25BDC-67F2-4D95-B1D5-F81B2039D11D)
+BdsDxe: starting Boot0000 "BootManagerMenuApp" from Fv(7CB8BDC9-F8EB-4F34-AAEA-3EE4AF6516A1)/FvFile(EEC25BDC-67F2-4D95-B1D5-F81B2039D11D)
+[2J[001;001H[1m[37m[44m[021;102H┌[021;103H─[021;104H─[021;105H─[021;106H─[021;107H─[021;108H─[021;109H─[021;110H─[021;111H─[021;112H─[021;113H─[021;114H─[021;115H─[021;116H─[021;117H─[021;118H─[021;119H─[021;120H─[021;121H─[021;122H─[021;123H─[021;124H─[021;125H─[021;126H─[021;127H─[021;128H─[021;129H─[021;130H─[021;131H─[021;132H─[021;133H─[021;134H─[021;135H─[021;136H─[021;137H─[021;138H─[021;139H┐[022;102H│[022;103H                                    [022;139H│[023;102H├[023;103H─[023;104H─[023;105H─[023;106H─[023;107H─[023;108H─[023;109H─[023;110H─[023;111H─[023;112H─[023;113H─[023;114H─[023;115H─[023;116H─[023;117H─[023;118H─[023;119H─[023;120H─[023;121H─[023;122H─[023;123H─[023;124H─[023;125H─[023;126H─[023;127H─[023;128H─[023;129H─[023;130H─[023;131H─[023;132H─[023;133H─[023;134H─[023;135H─[023;136H─[023;137H─[023;138H─[023;139H┤[024;102H│[024;103H                                    [024;139H│[025;102H│[025;103H                                    [025;139H│[026;102H│[026;103H                                    [026;139H│[027;102H│[027;103H                                    [027;139H│[028;102H│[028;103H                                    [028;139H│[029;102H│[029;103H                                    [029;139H│[030;102H│[030;103H                                    [030;139H│[031;102H├[031;103H─[031;104H─[031;105H─[031;106H─[031;107H─[031;108H─[031;109H─[031;110H─[031;111H─[031;112H─[031;113H─[031;114H─[031;115H─[031;116H─[031;117H─[031;118H─[031;119H─[031;120H─[031;121H─[031;122H─[031;123H─[031;124H─[031;125H─[031;126H─[031;127H─[031;128H─[031;129H─[031;130H─[031;131H─[031;132H─[031;133H─[031;134H─[031;135H─[031;136H─[031;137H─[031;138H─[031;139H┤[032;102H│[032;103H                                    [032;139H│[033;102H│[033;103H                                    [033;139H│[034;102H│[034;103H                                    [034;139H│[035;102H└[035;103H─[035;104H─[035;105H─[035;106H─[035;107H─[035;108H─[035;109H─[035;110H─[035;111H─[035;112H─[035;113H─[035;114H─[035;115H─[035;116H─[035;117H─[035;118H─[035;119H─[035;120H─[035;121H─[035;122H─[035;123H─[035;124H─[035;125H─[035;126H─[035;127H─[035;128H─[035;129H─[035;130H─[035;131H─[035;132H─[035;133H─[035;134H─[035;135H─[035;136H─[035;137H─[035;138H─[035;139H┘[022;108HPlease select boot device:[024;103HUbuntu[025;103HEFI Firmware Setup[026;103HUEFI PXEv4 (MAC:525400A69999)[027;103HUEFI PXEv6 (MAC:525400A69999)[028;103HUEFI HTTPv4 (MAC:525400A69999)[029;103HUEFI HTTPv6 (MAC:525400A69999)[030;103HEFI Internal Shell[032;108H↑ and ↓ to move selection[033;107HENTER to select boot device[034;115HESC to exit[0m[37m[40m[1m[37m[40m[024;103HUbuntu[0m[37m[40m

@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+# host-bootstrap [--no-nginx]: prepare an Ubuntu lab host (EC2 with nested virtualization, or
+# bare metal) for KVM/libvirt labs. Idempotent: safe to re-run. Installs the stack, makes the
+# kernel readable for libguestfs, joins the libvirt/kvm groups (log in again afterwards),
+# starts the default network, and creates the nginx deploy server (root /var/www/deploy,
+# autoindex, WebDAV PUT on /upload/) only if no other site exists. Ends with a check table.
+set -euo pipefail
+NGINX=yes
+for a in "$@"; do case "$a" in --no-nginx) NGINX=no ;; *) echo "usage: host-bootstrap [--no-nginx]" >&2; exit 2 ;; esac; done
+PKGS="qemu-system-x86 qemu-utils libvirt-daemon-system libvirt-clients virtinst ovmf swtpm swtpm-tools
+genisoimage libguestfs-tools python3-pexpect python3-yaml libxml2-utils jq cpu-checker whois zstd"
+if [ "$NGINX" = yes ]; then PKGS="$PKGS nginx"; fi
+sudo apt-get update -q
+# --no-upgrade: never upgrade packages that are already installed (the host may run other labs; a
+# libvirt/qemu upgrade changes the hypervisor under their VMs). It covers the NAMED packages only:
+# apt can still upgrade a dependency when a new package needs a newer version. Hence the plan below.
+# shellcheck disable=SC2086  # word splitting of the package list is intended
+SIM=$(sudo apt-get install -s --no-upgrade $PKGS 2>/dev/null) && SIMRC=0 || SIMRC=$?
+if [ "$SIMRC" -ne 0 ]; then
+  PLAN=unknown   # the simulation itself failed: do not claim there is nothing to install
+else
+  PLAN=$(awk '/^Inst /{print ($3 ~ /^\[/ ? "upgrade:" : "new:") $2} /^Remv /{print "remove:" $2}' <<<"$SIM" | xargs || true)
+fi
+echo "host-bootstrap: apt plan (new:/upgrade:/remove: ... ; named packages are not upgraded (dependency upgrades pulled in by apt can still happen)): ${PLAN:-nothing to install}"
+# shellcheck disable=SC2086  # same
+sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-upgrade $PKGS
+sudo chmod 0644 /boot/vmlinuz-* || true
+ME=${USER:-$(id -un)}
+MISSING=""
+MYGROUPS=$(id -nG "$ME" | tr ' ' '\n')   # a here-string below, not a pipe: grep -q exits early (SIGPIPE under pipefail)
+for g in libvirt kvm; do
+  if ! grep -qx "$g" <<<"$MYGROUPS"; then MISSING="${MISSING:+$MISSING,}$g"; fi
+done
+if [ -n "$MISSING" ]; then sudo usermod -aG "$MISSING" "$ME"; RELOGIN=yes; else RELOGIN=no; fi
+sudo virsh net-start default >/dev/null 2>&1 || true
+sudo virsh net-autostart default >/dev/null 2>&1 || true
+if [ ! -f "$HOME/.ssh/id_ed25519" ]; then ssh-keygen -q -t ed25519 -N '' -f "$HOME/.ssh/id_ed25519"; fi
+if [ "$NGINX" = yes ]; then
+  others=$(find /etc/nginx/sites-enabled -mindepth 1 ! -name default 2>/dev/null | head -1 || true)
+  if [ -n "$others" ]; then
+    echo "nginx: kept existing site $others"
+  else
+    sudo mkdir -p /var/www/deploy/iso /var/www/deploy/upload
+    sudo chown "$ME:$ME" /var/www/deploy /var/www/deploy/iso
+    sudo chown www-data:www-data /var/www/deploy/upload
+    sudo tee /etc/nginx/sites-available/deploy >/dev/null <<'EOF'
+server {
+    listen 80 default_server;
+    root /var/www/deploy;
+    autoindex on;
+    access_log /var/log/nginx/deploy-access.log;
+    location /upload/ {
+        dav_methods PUT;
+        create_full_put_path on;
+        client_max_body_size 500m;
+    }
+}
+EOF
+    sudo rm -f /etc/nginx/sites-enabled/default
+    sudo ln -sf /etc/nginx/sites-available/deploy /etc/nginx/sites-enabled/deploy
+    sudo nginx -t
+    sudo systemctl restart nginx
+    echo "nginx: deploy site created (files served must be readable by www-data: 644, not 600)"
+  fi
+fi
+fail=0
+row() { printf '| %-28s | %-40s | %s |\n' "$1" "$2" "$3"; }
+echo "| check                        | value                                    | ok? |"
+vmx=$(grep -cwE 'vmx|svm' /proc/cpuinfo || true)
+if [ "$vmx" -gt 0 ]; then row "vmx/svm flags" "$vmx" yes; else row "vmx/svm flags" 0 NO; fail=1; fi
+if kvm-ok >/dev/null 2>&1; then row kvm-ok "KVM acceleration can be used" yes; else row kvm-ok "fails" NO; fail=1; fi
+for f in /usr/share/OVMF/OVMF_CODE_4M.fd /usr/share/OVMF/OVMF_VARS_4M.fd; do
+  if [ -f "$f" ]; then row "$(basename "$f")" present yes; else row "$(basename "$f")" missing NO; fail=1; fi
+done
+devs=$(qemu-system-x86_64 -device help 2>/dev/null | grep -oE '"(pvscsi|vmxnet3)"' | tr -d '"' | xargs || true)
+row "qemu VMware devices" "${devs:-none} (pvscsi is not bootable by OVMF)" info
+if grep -qx libvirt <<<"$(id -nG | tr ' ' '\n')"; then grp=yes; else grp="no: log in again"; fi
+row "libvirt group (this login)" "$grp" info
+row "default network" "$(sudo virsh net-info default 2>/dev/null | awk '/Active/{print $2}')" info
+if [ "$NGINX" = yes ]; then row nginx "$(systemctl is-active nginx 2>/dev/null || true)" info; fi
+row "free disk /" "$(df -h / | awk 'NR==2{print $4}')" info
+if [ "$RELOGIN" = yes ]; then echo "NOTE: added $ME to $MISSING: open a new SSH session before using virsh."; fi
+exit $fail

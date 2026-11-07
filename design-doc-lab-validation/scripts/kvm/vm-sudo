@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# vm-sudo DOM 'shell commands': run commands as root on a lab VM. Hardened guests keep sudo
+# password-protected, so the password is read from $PASSFILE (mode 600) and fed to sudo -S;
+# it never appears on a command line or in logs. Without PASSFILE, sudo -n is used.
+HERE=$(cd "$(dirname "$0")" && pwd)
+# shellcheck source=_lib.sh
+source "$HERE/_lib.sh"
+[ $# -eq 2 ] || usage "DOM 'shell commands'"
+DOM=$1; CMD=$2
+load_env_optional
+if [ -n "$PASSFILE" ] && [ ! -r "$PASSFILE" ]; then die "PASSFILE $PASSFILE not readable"; fi
+IP=$("$HERE/vm-ip" "$DOM") || die "no reachable IP for $DOM"
+U=${VM_USER:-$LAB_USER}
+TMP=$(mktemp); trap 'rm -f "$TMP"' EXIT
+printf '%s\n' "$CMD" > "$TMP"
+scp -q "${SSH_OPTS[@]}" "$TMP" "$U@$IP:.lab-run.sh" </dev/null
+if [ -n "$PASSFILE" ]; then
+  ssh "${SSH_OPTS[@]}" "$U@$IP" "sudo -S -p '' bash ~/.lab-run.sh; rc=\$?; rm -f ~/.lab-run.sh; exit \$rc" < "$PASSFILE"
+else
+  ssh "${SSH_OPTS[@]}" "$U@$IP" "sudo -n bash ~/.lab-run.sh; rc=\$?; rm -f ~/.lab-run.sh; exit \$rc" </dev/null
+fi

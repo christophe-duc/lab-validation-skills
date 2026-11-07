@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# wait-ready DOM [TIMEOUT_S] [--no-cloud-init]: wait until DOM answers SSH, then until
+# cloud-init has finished. Heartbeat every 30 s (VM CPU time, disk writes, nginx requests
+# if NGINX_LOG is set): a VM whose counters do not move is stuck, not slow.
+# Timing -> $EVID/timing/first-boot.txt. Exit 1 on timeout.
+HERE=$(cd "$(dirname "$0")" && pwd)
+# shellcheck source=_lib.sh
+source "$HERE/_lib.sh"
+CI=yes; ARGS=()
+for a in "$@"; do if [ "$a" = --no-cloud-init ]; then CI=no; else ARGS+=("$a"); fi; done
+if [ ${#ARGS[@]} -lt 1 ] || [ ${#ARGS[@]} -gt 2 ]; then usage "DOM [TIMEOUT_S] [--no-cloud-init]"; fi
+DOM=${ARGS[0]}; T=${ARGS[1]:-900}
+if ! [[ $T =~ ^[0-9]+$ ]]; then usage "DOM [TIMEOUT_S] [--no-cloud-init]"; fi
+load_env
+heartbeat() {
+  local s
+  s=$(virsh domstats "$DOM" --cpu-total --block 2>/dev/null \
+      | awk -F= '/cpu.time=|block.0.wr.bytes=/{gsub(/^ +/, "", $1); printf "%s=%s ", $1, $2}')
+  if [ -n "$NGINX_LOG" ] && [ -r "$NGINX_LOG" ]; then s="$s nginx_requests=$(wc -l < "$NGINX_LOG" | tr -d ' ')"; fi
+  echo "$s"
+}
+t0=$(date +%s); last=0; hb=""
+until "$HERE/vm-ssh" "$DOM" true </dev/null >/dev/null 2>&1; do
+  now=$(date +%s); el=$((now - t0))
+  if [ "$el" -ge "$T" ]; then hb=$(heartbeat); echo "TIMEOUT waiting for SSH on $DOM after ${el}s (last heartbeat: $hb)"; exit 1; fi
+  if [ $((now - last)) -ge 30 ]; then hb=$(heartbeat); echo "  $DOM ${el}s $hb"; last=$now; fi
+  sleep 5
+done
+t_ssh=$(( $(date +%s) - t0 ))
+if [ "$CI" = yes ]; then
+  "$HERE/vm-ssh" "$DOM" "timeout $T cloud-init status --wait >/dev/null 2>&1; cloud-init status --format json 2>/dev/null" </dev/null \
+    > "$EVID/state/$DOM-cloud-init-status-$(date +%s).json" || true
+fi
+t_ci=$(( $(date +%s) - t0 ))
+echo "$DOM ssh_ready_s=$t_ssh cloud_init_done_s=$t_ci" | tee -a "$EVID/timing/first-boot.txt"

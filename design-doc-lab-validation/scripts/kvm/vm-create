@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+# vm-create NAME (--disk PATH [--import] | --size GB) [--cdrom PATH]... [--kernel K --initrd I --args "A"]
+# Env: MEM (MiB, 4096) VCPUS (2) NET (default) SB=yes TPM=yes PVDATA=yes MAC (default mac-for NAME)
+# virt-install on q35 with an explicit OVMF loader (libvirt's auto-selection picks the AMD SEV
+# firmware, which AppArmor rejects). SB=yes: Secure Boot with enrolled keys + SMM. Refuses to
+# start when running guests + MEM exceed MAX_RUNNING_GB (the host OOM-kills a guest otherwise).
+# --args must not contain commas (virt-install sub-option syntax).
+HERE=$(cd "$(dirname "$0")" && pwd)
+# shellcheck source=_lib.sh
+source "$HERE/_lib.sh"
+U="NAME (--disk PATH [--import] | --size GB) [--cdrom PATH]... [--kernel K --initrd I --args A]"
+[ $# -ge 1 ] || usage "$U"
+NAME=$1; shift
+DISK=""; SIZE=""; IMPORT=no; CDS=(); KERNEL=""; INITRD=""; KARGS=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --disk) DISK=${2:-}; shift 2 || usage "$U" ;;
+    --size) SIZE=${2:-}; shift 2 || usage "$U" ;;
+    --import) IMPORT=yes; shift ;;
+    --cdrom) CDS+=("${2:-}"); shift 2 || usage "$U" ;;
+    --kernel) KERNEL=${2:-}; shift 2 || usage "$U" ;;
+    --initrd) INITRD=${2:-}; shift 2 || usage "$U" ;;
+    --args) KARGS=${2:-}; shift 2 || usage "$U" ;;
+    *) usage "$U" ;;
+  esac
+done
+if { [ -n "$DISK" ] && [ -n "$SIZE" ]; } || [ -z "$DISK$SIZE" ]; then usage "$U"; fi
+if [ -n "$KERNEL" ]; then
+  [ -n "$INITRD" ] || usage "$U"
+  INST=(--install "kernel=$KERNEL,initrd=$INITRD,kernel_args=$KARGS,kernel_args_overwrite=yes")
+elif [ -n "$DISK" ] && [ "$IMPORT" = yes ]; then
+  INST=(--import)
+else
+  usage "$U"
+fi
+load_env
+require_prefix "$NAME"
+MEM=${MEM:-4096}; VCPUS=${VCPUS:-2}; NET=${NET:-default}
+
+used_kib=0; info=
+for d in $(virsh list --name 2>/dev/null); do
+  if ! info=$(virsh dominfo "$d" 2>/dev/null); then
+    echo "warning: cannot read memory of $d, counted as 0" >&2; continue
+  fi
+  k=$(awk '/^Max memory/{print $3}' <<<"$info")
+  used_kib=$((used_kib + ${k:-0}))
+done
+if [ $((used_kib + MEM * 1024)) -gt $((MAX_RUNNING_GB * 1024 * 1024)) ]; then
+  die "memory guard: running guests use $((used_kib / 1024)) MiB, +$MEM MiB > MAX_RUNNING_GB=$MAX_RUNNING_GB; shut a VM down or raise MAX_RUNNING_GB in lab.env"
+fi
+
+MAC=${MAC:-$("$HERE/mac-for" "$NAME")}
+if [ "${SB:-no}" = yes ]; then
+  BOOT=(--boot "firmware=efi,firmware.feature0.name=secure-boot,firmware.feature0.enabled=yes,firmware.feature1.name=enrolled-keys,firmware.feature1.enabled=yes" --features smm.state=on)
+else
+  BOOT=(--boot "loader=$CODE,loader.readonly=yes,loader.type=pflash,nvram.template=$VARS")
+fi
+if [ "${TPM:-no}" = yes ]; then TPMA=(--tpm "emulator,model=tpm-crb,version=2.0"); else TPMA=(--tpm none); fi
+if [ -n "$DISK" ]; then DA=(--disk "path=$DISK,bus=scsi")
+else DA=(--disk "path=$IMG/$NAME.qcow2,size=$SIZE,format=qcow2,bus=scsi"); fi
+PV=()
+if [ "${PVDATA:-no}" = yes ]; then
+  # OVMF cannot boot PVSCSI; a data disk on a PVSCSI controller still exercises vmw_pvscsi
+  if sudo test -e "$IMG/$NAME-pvdata.qcow2"; then die "$IMG/$NAME-pvdata.qcow2 already exists"; fi
+  sudo qemu-img create -q -f qcow2 "$IMG/$NAME-pvdata.qcow2" 1G
+  PV=(--controller "type=scsi,index=1,model=vmpvscsi"
+      --disk "path=$IMG/$NAME-pvdata.qcow2,bus=scsi,address.type=drive,address.controller=1,address.bus=0,address.target=0,address.unit=0")
+fi
+CD=()
+for c in ${CDS[@]+"${CDS[@]}"}; do CD+=(--disk "path=$c,device=cdrom,bus=sata,readonly=on"); done
+SER=/var/log/libvirt/qemu/$NAME-$(date +%s).serial.log
+virt-install --name "$NAME" --memory "$MEM" --vcpus "$VCPUS" --osinfo detect=on,require=off --machine q35 \
+  "${BOOT[@]}" "${TPMA[@]}" --controller "type=scsi,index=0,model=$SCSI_MODEL" "${DA[@]}" \
+  ${PV[@]+"${PV[@]}"} ${CD[@]+"${CD[@]}"} \
+  --network "network=$NET,model=$NIC_MODEL,mac=$MAC" --graphics none --serial "pty,log.file=$SER" \
+  "${INST[@]}" --noautoconsole </dev/null
+date -u +%Y-%m-%dT%H:%M:%SZ > "$EVID/timing/$NAME.started"
+echo "$NAME started: mac $MAC, net $NET, mem $MEM MiB, serial $SER"

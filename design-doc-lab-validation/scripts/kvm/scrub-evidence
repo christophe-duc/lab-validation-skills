@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+# scrub-evidence [--fix] [--secrets DIR] [--pubkey FILE]... DIR
+# Look for secrets in an evidence bundle before it leaves the lab: every line of every file in
+# the secrets dir (dotfiles and subdirectories included; lines under 6 chars or only whitespace
+# are skipped; each line is one search string, so a secret file should hold just the value),
+# crypt(3) password hashes, private keys, and the given SSH public keys. Prints only
+# "HIT <kind> <file>", never a value. --fix redacts password hashes in place (to
+# <scrubbed-hash>); other hits must be removed by hand.
+# Known limit: symlinks inside the evidence dir are not followed (grep -r skips them; grep -R
+# follows them on GNU grep but is the same as -r on macOS BSD grep, so it is not portable). Replace
+# any symlink in the bundle with a copy of its target, or do not put one there, before scanning.
+# Exit 0 clean, 1 hits remain or the scan could not complete (grep or find error), 2 usage.
+# Without --secrets, uses $SECRETS from lab.env; if that dir does not exist the tool prints a
+# note and the final line says "(secrets not checked)".
+HERE=$(cd "$(dirname "$0")" && pwd)
+# shellcheck source=_lib.sh
+source "$HERE/_lib.sh"
+U="[--fix] [--secrets DIR] [--pubkey FILE]... DIR"
+FIX=no; SDIR=""; PUBS=()
+while [ $# -gt 1 ]; do
+  case "$1" in
+    --fix) FIX=yes; shift ;;
+    --secrets) SDIR=${2:-}; shift 2 || usage "$U" ;;
+    --pubkey) PUBS+=("${2:-}"); shift 2 || usage "$U" ;;
+    *) usage "$U" ;;
+  esac
+done
+if [ $# -ne 1 ] || [ ! -d "$1" ]; then usage "$U"; fi
+D=$1
+if [ -z "$SDIR" ]; then
+  load_env_optional; SDIR=$SECRETS
+  if [ ! -d "$SDIR" ]; then
+    echo "note: no secrets dir at $SDIR; only hashes, private keys and given pubkeys are checked"
+  fi
+elif [ ! -d "$SDIR" ]; then
+  echo "scrub-evidence: secrets dir $SDIR not found" >&2; exit 2
+fi
+# shellcheck disable=SC2016  # regex for grep -E, must not expand
+HASH_RE='\$(1|5|6|y|gy|2[aby])\$[A-Za-z0-9./$]{8,}'
+PAT=$(mktemp); FLIST=$(mktemp); trap 'rm -f "$PAT" "$FLIST"' EXIT
+HITS=0; GREPFAIL=no; FINDFAIL=no; GOUT=""
+CHECKED=no
+if [ -d "$SDIR" ]; then
+  case $SDIR in -*) SDIR=./$SDIR ;; esac   # a path starting with '-' must not be read as a find option
+  # -L: follow a symlinked secrets dir and symlinked files in it. The listing goes to a file so
+  # find's exit status is seen: a listing that could not complete is never clean. Under -L a
+  # dangling symlink has type l, so list "f or l": awk then fails on it and the scan is incomplete.
+  if ! find -L "$SDIR" \( -type f -o -type l \) > "$FLIST" 2>/dev/null; then
+    echo "scrub-evidence: find failed on $SDIR (unreadable subdirectory?)" >&2
+    FINDFAIL=yes
+  fi
+  while IFS= read -r f; do
+    awk 'length($0) >= 6 && $0 !~ /^[[:space:]]*$/' "$f" >> "$PAT" || FINDFAIL=yes
+  done < "$FLIST"
+  # secrets count as checked only when the secrets dir gave at least one usable line
+  if [ -s "$PAT" ]; then CHECKED=yes; fi
+fi
+for p in ${PUBS[@]+"${PUBS[@]}"}; do awk 'length($2) >= 20 {print $2}' "$p" >> "$PAT"; done
+# gg ARGS...: run grep, keep its output in GOUT; exit status 2 (error) marks the scan failed.
+gg() {
+  local rc=0
+  GOUT=$(grep "$@" 2>/dev/null) || rc=$?
+  if [ "$rc" -ge 2 ]; then GREPFAIL=yes; fi
+}
+# emit KIND: print a HIT line per file in GOUT
+emit() {
+  local f
+  if [ -n "$GOUT" ]; then
+    while IFS= read -r f; do echo "HIT $1 $f"; HITS=$((HITS + 1)); done <<< "$GOUT"
+  fi
+}
+scan() {
+  HITS=0
+  if [ -s "$PAT" ]; then gg -rlF -f "$PAT" -- "$D"; emit secret; fi
+  gg -rlE "$HASH_RE" -- "$D"; emit hash
+  gg -rlE 'BEGIN [A-Z ]*PRIVATE KEY' -- "$D"; emit private-key
+}
+scan
+if [ "$FIX" = yes ] && [ "$HITS" -gt 0 ]; then
+  gg -rlE "$HASH_RE" -- "$D"
+  while IFS= read -r f; do
+    if [ -z "$f" ]; then continue; fi
+    perl -pi -e 's/\$(?:1|5|6|y|gy|2[aby])\$[A-Za-z0-9.\/\$]{8,}/<scrubbed-hash>/g' "$f"
+    echo "fixed hashes in $f"
+  done <<< "$GOUT"
+  echo "-- re-scan after --fix"; scan
+fi
+if [ "$FINDFAIL" = yes ] || [ "$GREPFAIL" = yes ]; then
+  if [ "$FINDFAIL" = yes ]; then
+    echo "scrub-evidence: scan incomplete: the secrets directory could not be read completely" >&2
+  else
+    echo "scrub-evidence: grep failed on $D (unreadable files?)" >&2
+  fi
+  echo "scrub-evidence: scan incomplete, $HITS hit(s) in $D"; exit 1
+fi
+if [ "$HITS" -eq 0 ]; then
+  if [ "$CHECKED" = yes ]; then echo "scrub-evidence: $D is clean"
+  else echo "scrub-evidence: $D is clean of hashes and private keys (secrets not checked)"; fi
+  exit 0
+fi
+echo "scrub-evidence: $HITS hit(s) in $D"; exit 1
