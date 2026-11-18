@@ -1,8 +1,20 @@
 # lab-validation-skills
 
-Private skills for agent-run lab validation. Main skill: `design-doc-lab-validation/` (workflow, gates, guardrails) with its harness: `references/` (EC2 nested virtualization, pitfalls, recipes), `scripts/kvm/` (tested helpers for KVM/libvirt lab hosts) and `templates/`.
+Skills for agent-run lab validation. Main skill: `design-doc-lab-validation/` (workflow, gates, guardrails) with its harness: `references/` (EC2 nested virtualization, pitfalls, recipes), `scripts/kvm/` (tested helpers for KVM/libvirt lab hosts) and `templates/`.
 
-## Install
+## Workflow
+
+The skill will take a test plan, a design, a proposed architecture (preferably in MD format) and will execute tests to confirm if the document is working as intended or what are the corrections needed to the document. The skill will keep evidence of everything that has been run and tested and will write a lab-test report at the end of the run.
+
+At the start of the run, the skill should ask the following to confirm what it will run:
+Gate1: open points, any questions related to the document the agent has read
+Gate2: approval of the test matrix, agent will propose tests, review them, change them if needed and approve them
+Gate3: read the pitfalls, templates, versions to use
+Gate4: Check pricing on what it needs and who is responsible for tearing down the lab environment
+
+At the end, it will produce the lab-report and corrections to the original document (every change is well marked)
+
+## How to install
 ```bash
 ./install.sh                # opencode symlink + dist/design-doc-lab-validation.zip
 ./install.sh --copy         # if opencode does not follow the symlink
